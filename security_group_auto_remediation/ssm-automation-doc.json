@@ -1,0 +1,34 @@
+{  
+  "description": "Automation Document Example JSON Template",  
+  "schemaVersion": "0.3",  
+  "assumeRole": "{{ AutomationAssumeRole }}",  
+  "parameters": {  
+    "SecurityGroup": {  
+      "type": "String",  
+      "description": "{{ SecurityGroupID }}"  
+    },  
+    "AutomationAssumeRole": {  
+      "type": "String",  
+      "description": "The ARN of the role",  
+      "default": ""  
+    },  
+    "MasterAccountID": {  
+      "type": "String",  
+      "description": "The Master Account ID",  
+      "default": ""  
+    }  
+  },  
+  "mainSteps": [  
+    {  
+      "name": "invokeMyLambdaFunction",  
+      "action": "aws:invokeLambdaFunction",  
+      "maxAttempts": 3,  
+      "timeoutSeconds": 120,  
+      "onFailure": "Abort",  
+      "inputs": {  
+        "FunctionName": "arn:aws:lambda:us-east-1:{{MasterAccountID}}:function:AutomationSecurityGroupConformance",  
+        "Payload": "{\"parameterName\":\"SecurityGroup\", \"parameterValue\":\"{{SecurityGroup}}\", \"accountID\":\"{{global:ACCOUNT_ID}}\"}"  
+      }  
+    }  
+  ]  
+}  

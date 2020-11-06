@@ -1,0 +1,309 @@
+AWSTemplateFormatVersion: 2010-09-09
+Resources:
+
+  LambdaExecutionRoleForConfig:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+              AWS: 
+                - '*'
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+      - "arn:aws:iam::aws:policy/AmazonEC2FullAccess"
+      - "arn:aws:iam::aws:policy/CloudWatchLogsFullAccess"
+      - "arn:aws:iam::aws:policy/service-role/AWSConfigRulesExecutionRole"
+      RoleName: LambdaExecutionRoleForConfig
+      Policies:
+        - PolicyName: assumeLambdaExecutionRolePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: "sts:AssumeRole"
+                Resource: "arn:aws:iam::*:role/LambdaExecutionRoleForConfig"
+
+  AutomationLambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+              AWS: 
+                - '*'
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+      - "arn:aws:iam::aws:policy/AmazonEC2FullAccess"
+      - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      RoleName: AutomationLambdaRole
+      Policies:
+        - PolicyName: assumeAutomationRolePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: "sts:AssumeRole"
+                Resource: "arn:aws:iam::*:role/AutomationLambdaRole"
+
+  AutomationRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - ec2.amazonaws.com
+              - ssm.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      RoleName: AutomationRole
+      ManagedPolicyArns:
+      - "arn:aws:iam::aws:policy/AmazonEC2FullAccess"
+      - "arn:aws:iam::aws:policy/service-role/AmazonSSMAutomationRole"
+
+  RuleFunction: 
+    Type: AWS::Lambda::Function
+    Properties: 
+      Handler: index.handler
+      Runtime: python3.7
+      FunctionName: ConformancePackSecurityGroup
+      Role: !GetAtt LambdaExecutionRoleForConfig.Arn
+      Code: 
+        ZipFile: |
+          import boto3
+          import json
+
+
+          APPLICABLE_RESOURCES = ["AWS::EC2::SecurityGroup"]
+
+          def evaluate_compliance(configuration_item, credentials):
+
+              # Start as compliant
+              compliance_type = 'COMPLIANT'
+              annotation = "Security group is compliant."
+
+              # Check if resource was deleted
+              if configuration_item['configurationItemStatus'] == "ResourceDeleted":
+                  compliance_type = 'NOT_APPLICABLE'
+                  annotation = "This resource was deleted."
+
+              # Check resource for applicability
+              elif configuration_item["resourceType"] not in APPLICABLE_RESOURCES:
+                  compliance_type = 'NOT_APPLICABLE'
+                  annotation = "The rule doesn't apply to resources of type " \
+                               + configuration_item["resourceType"] + "."
+
+              else:
+                  # get ingress for resourceID
+                  resourceID = configuration_item['resourceId']
+                  conn=boto3.client(
+                      'ec2',
+                      aws_access_key_id=credentials['AccessKeyId'],
+                      aws_secret_access_key=credentials['SecretAccessKey'],
+                      aws_session_token=credentials['SessionToken'],
+                  )
+                  SecurityGroups = conn.describe_security_groups(GroupIds=[resourceID])
+                  SecurityGroup = SecurityGroups['SecurityGroups'][0]
+                  # Iterate over IP permissions
+                  for i in SecurityGroup['IpPermissions']:
+                      # inbound rules with no "fromPort" have a value of "All"
+                      for j in i['IpRanges']:
+                          if "/" in j['CidrIp']:
+                              mask = int(j['CidrIp'].split('/')[1])
+                              print ("Mask is ", + mask)
+                              if mask < 16:
+                                  compliance_type = 'NON_COMPLIANT'
+                                  annotation = 'Security group is not compliant.'
+                                  #conn.revoke_security_group_ingress(GroupId=resourceID,IpPermissions=[i])
+                                 # compliance_type = 'COMPLIANT'
+                                  annotation = 'Security group is not compliant.'
+                      for n in i['Ipv6Ranges']:
+                          if "/" in n['CidrIpv6']:
+                              mask = int(n['CidrIpv6'].split('/')[1])
+                              print ("Mask is ", + mask)
+                              if mask < 16:
+                                  compliance_type = 'NON_COMPLIANT'
+                                  annotation = 'Security group is not compliant.'
+              return {
+                  "compliance_type": compliance_type,
+                  "annotation": annotation
+              }
+
+
+          def handler(event, context):
+              executionRoleArn = 'arn:aws:iam::'+event['accountId']+':role/LambdaExecutionRoleForConfig'
+              sts_client = boto3.client('sts')
+              assumed_role_object=sts_client.assume_role(
+                  RoleArn=executionRoleArn,
+                  RoleSessionName="AssumeRoleSession1"
+              )
+              credentials=assumed_role_object['Credentials']
+              
+              config=boto3.client('config',
+                  aws_access_key_id=credentials['AccessKeyId'],
+                  aws_secret_access_key=credentials['SecretAccessKey'],
+                  aws_session_token=credentials['SessionToken'],)
+              
+              configRuleName = event['configRuleName']
+              
+              invoking_event = json.loads(event['invokingEvent'])
+              print(invoking_event)
+              configuration_item = invoking_event["configurationItem"]
+              print(configuration_item)
+              evaluation = evaluate_compliance(configuration_item, credentials)
+
+              print('Compliance evaluation for %s: %s' % (configuration_item['resourceId'], evaluation["compliance_type"]))
+              print('Annotation: %s' % (evaluation["annotation"]))
+
+
+              response = config.put_evaluations(
+                 Evaluations=[
+                     {
+                         'ComplianceResourceType': invoking_event['configurationItem']['resourceType'],
+                         'ComplianceResourceId':   invoking_event['configurationItem']['resourceId'],
+                         'ComplianceType':         evaluation["compliance_type"],
+                         "Annotation":             evaluation["annotation"],
+                         'OrderingTimestamp':      invoking_event['configurationItem']['configurationItemCaptureTime']
+                     },
+                 ],
+                 ResultToken=event['resultToken'])
+  ConfigFunctionPermissions:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !GetAtt RuleFunction.Arn
+      Principal: 'config.amazonaws.com'
+
+  AutomationFunction: 
+    Type: AWS::Lambda::Function
+    Properties: 
+      Handler: index.handler
+      Role: !GetAtt AutomationLambdaRole.Arn
+      Runtime: python3.7
+      FunctionName: AutomationSecurityGroupConformance
+      Code: 
+        ZipFile: |
+          import boto3
+          import json
+
+          def handler(event, context):
+              print(event)
+              executionRoleArn = 'arn:aws:iam::'+event['accountID']+':role/AutomationLambdaRole'
+              sts_client = boto3.client('sts')
+              assumed_role_object=sts_client.assume_role(
+                  RoleArn=executionRoleArn,
+                  RoleSessionName="AssumeRoleSession1"
+              )
+              credentials=assumed_role_object['Credentials']
+              
+              conn=boto3.client(
+                  'ec2',
+                  aws_access_key_id=credentials['AccessKeyId'],
+                  aws_secret_access_key=credentials['SecretAccessKey'],
+                  aws_session_token=credentials['SessionToken'],
+              )
+              resourceID = event['parameterValue']
+              print(resourceID)
+              SecurityGroups = conn.describe_security_groups(GroupIds=[resourceID])
+              SecurityGroup = SecurityGroups['SecurityGroups'][0]
+              for i in SecurityGroup['IpPermissions']:
+                      # inbound rules with no "fromPort" have a value of "All"
+                      for j in i['IpRanges']:
+                          if "/" in j['CidrIp']:
+                              mask = int(j['CidrIp'].split('/')[1])
+                              print ("Mask is ", + mask)
+                              if mask < 16:
+                                  compliance_type = 'NON_COMPLIANT'
+                                  annotation = 'Security group is not compliant.'
+                                  conn.revoke_security_group_ingress(GroupId=resourceID,IpPermissions=[i])
+                                  compliance_type = 'COMPLIANT'
+                                  annotation = 'Security group is not compliant.'
+                      for n in i['Ipv6Ranges']:
+                          if "/" in n['CidrIpv6']:
+                              mask = int(n['CidrIpv6'].split('/')[1])
+                              print ("Mask is ", + mask)
+                              if mask < 16:
+                                  compliance_type = 'NON_COMPLIANT'
+                                  annotation = 'Security group is not compliant.'
+                                  conn.revoke_security_group_ingress(GroupId=resourceID,IpPermissions=[i])
+                                  compliance_type = 'COMPLIANT'
+                                  annotation = 'Security group is compliant.'
+
+
+  #==================================================
+
+  # SSM Automation Document
+
+  #==================================================
+  AutomationSSMDocument:
+    Type: AWS::SSM::Document
+    Properties: 
+      Content: {  
+        "description": "Automation Document Example JSON Template",  
+        "schemaVersion": "0.3",  
+        "assumeRole": "{{ AutomationAssumeRole }}",  
+        "parameters": {  
+          "SecurityGroup": {  
+            "type": "String",  
+            "description": "{{ SecurityGroupID }}"  
+          },  
+          "AutomationAssumeRole": {  
+            "type": "String",  
+            "description": "The ARN of the role",  
+            "default": ""  
+          },  
+          "MasterAccountID": {  
+            "type": "String",  
+            "description": "The Master Account ID",  
+            "default": ""  
+          }  
+        },  
+        "mainSteps": [  
+          {  
+            "name": "invokeMyLambdaFunction",  
+            "action": "aws:invokeLambdaFunction",  
+            "maxAttempts": 3,  
+            "timeoutSeconds": 120,  
+            "onFailure": "Abort",  
+            "inputs": {  
+              "FunctionName": "arn:aws:lambda:us-east-1:{{MasterAccountID}}:function:AutomationSecurityGroupConformance",  
+              "Payload": "{\"parameterName\":\"SecurityGroup\", \"parameterValue\":\"{{SecurityGroup}}\", \"accountID\":\"{{global:ACCOUNT_ID}}\"}"  
+            }  
+          }  
+        ]  
+      } 
+
+      DocumentType: Automation
+      Name: SecurityGroupAutomationSSMDocument
+
+
+Outputs:
+  ConfigRuleFunctionName:
+    Description: The Name of the config rule function
+    Value: !Ref RuleFunction
+  ConfigRuleFunctionARN:
+    Description: The ARN of the config rule function
+    Value: !GetAtt RuleFunction.Arn
+  AutomationeFunctionName:
+    Description: The Name of the config rule function
+    Value: !Ref AutomationLambdaRole
+  AutomationFunctioARN:
+    Description: The ARN of the config rule function
+    Value: !GetAtt AutomationLambdaRole.Arn
+

@@ -1,0 +1,47 @@
+Parameters:
+  SecurityGroupMaskLambdaArn:
+    Description: The ARN of the custom config rule lambda.
+    Type: String
+Resources:
+  CustomRuleForSecurityGroup:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: "CustomRuleForSecurityGroup"
+      Scope:
+        ComplianceResourceTypes:
+          - "AWS::EC2::SecurityGroup"
+      Source:
+        Owner: "CUSTOM_LAMBDA"
+        SourceDetails:
+          -
+            EventSource: "aws.config"
+            MessageType: "ConfigurationItemChangeNotification"
+        SourceIdentifier:
+          Ref: SecurityGroupMaskLambdaArn
+  SecurityGroupRemediation:
+    DependsOn: CustomRuleForSecurityGroup
+    Type: 'AWS::Config::RemediationConfiguration'
+    Properties:
+      ConfigRuleName: CustomRuleForSecurityGroup
+      ResourceType: "AWS::EC2::SecurityGroup"
+      TargetId: "arn:aws:ssm:us-east-1:{MasterAccountID}:document/SecurityGroupAutomation"
+      TargetType: "SSM_DOCUMENT"
+      Parameters:
+        SecurityGroup:
+          ResourceValue:
+            Value: "RESOURCE_ID"
+        AutomationAssumeRole:
+          StaticValue:
+            Values:
+              - "arn:aws:iam::{MasterAccountID}:role/AutomationRole"
+        MasterAccountID:
+          StaticValue:
+            Values:
+              - "{MasterAccountID}"  
+      ExecutionControls:
+        SsmControls:
+          ConcurrentExecutionRatePercentage: 10
+          ErrorPercentage: 10
+      Automatic: True
+      MaximumAutomaticAttempts: 10
+      RetryAttemptSeconds: 600
